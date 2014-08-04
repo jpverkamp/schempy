@@ -1,56 +1,64 @@
 import os
 import sys
-import copy
 import types
 
-import pyparsing
-
-from SchempyExport import Export, Thunk
+from Environment import Environment
 from SchempyException import SchempyException
-from SchempyEnvironment import SchempyEnvironment
-from pyparsing import ParseException
+from SchempySymbol import SchempySymbol
+from SchempyParser import SchempyParser
+from SchempyDot import SchempyDot
+
+# Big todo list of firey doom!
+# TODO: Proper tail recursion.
+# TODO: Vectors
+# TODO: Macros
+
+
+def Stackless(f):
+	import stackless
+	
+	def new_f(*args, **kwargs):
+		def wrap(channel, f, args, kwargs):
+			channel.send(f(*args, **kwargs))
+
+		channel = stackless.channel()
+		stackless.tasklet(wrap)(channel, f, args, kwargs)
+		return channel.receive()
+	
+	new_f.__name__ = f.__name__
+	new_f.__doc__ = f.__doc__	
+	
+	return new_f
 
 class Schempy:
-	"""Main parsing engine."""
+	"""The main body of Schempy."""
 
 	def __init__(self):
-		"""Initialize everything."""
+		"""Initialize Schempy."""
 
-		self.Trace = False
+		# Initialize everything
+		self.Parser = SchempyParser()
+		self.Environment = SchempyEnvironment()
+
+		# Add functions the tie directly into the interpreter to Schempy.
+		self.Environment['exit'] = lambda : self.__stop__()
+		self.Environment['load'] = lambda f : self.__load__(f)
+		self.Environment['env'] = lambda : self.Environment
+		self.Environment['blah'] = lambda x, y : x + y
+		
+		# Load the global functions.
+		self.__load__('global.py')
+		#self.__load__('global.ss')
+		
+		# Wrap the environments, shadowing is allowed, overwriting is not.
+		self.Environment = SchempyEnvironment(self.Environment)
+		
+		# Schempy is read to run!
 		self.Running = True
 		
-		self.__InitParser()
-		self.__InitEnvironment()
-
-	def Evaluate(self, exp):
-		"""Evaluate an expression."""
-
-		# Convert to lowercase, parse.
-		# TODO: Handle other exception types.
-		try:
-			exps = self.SExp.parseString(exp.lower())
-		except ParseException as ex:
-			raise SchempyException(str(ex))
-		
-		# Loop through the expressions.
-		results = []
-		for exp in exps:
-			result = self.__Eval(exp)
-			if result != None:
-				resultStr = self.__tostr(result)
-				if resultStr:
-					results.append(resultStr)
-				
-			# If (quit) or (exit) was called, stop now.
-			if not self.Running:
-				break
-				
-		# Return a list of results.
-		return results
-
 	def REPL(self):
-		"""Runs a Read-Eval-Print-Loop"""
-
+		"""Activate a Read-Eval-Print-Loop"""
+		
 		# Keep going until (exit) or (quit)
 		while self.Running:
 			line = ''
@@ -60,7 +68,7 @@ class Schempy:
 			lparens = 0
 			rparens = 0
 			print '\nSchempy>',
-			while line == '' or lparens != rparens:
+			while line == '' or lparens > rparens:
 				if line != '': print '        ',
 				line += raw_input('')
 				lparens = line.count('(') + line.count('[')
@@ -68,16 +76,105 @@ class Schempy:
 				
 			# Got the input, try to evaluate it.
 			try:
-				results = self.Evaluate(line)
+				results = self(line)
 				for line in results:
 					print line
 					
 			# Something broke, report the error.
 			except SchempyException as ex:
 				print '\nError: %s' % str(ex)
+
+	def __stop__(self):
+		"""Stop evaluating things."""
+		
+		self.Running = False		
+
+	def __call__(self, s):
+		"""Evaluate a string containing Schempy code."""
+
+		# Parse the string into a list of Schempy expressions.
+		exps = self.Parser(s)
+
+		# Evaluate each expression.
+		results = []
+		for exp in exps:
+			if not self.Running:
+				break
+			else:
+				# Run the code, look for problems.
+				try:
+					result = self.__toscheme__(self.__eval__(exp))
+					if result:
+						results.append(result)
+						
+				# User requested stop.  Stop executing.
+				except KeyboardInterrupt as e:
+					self.Running = False
 				
-	def Load(self, filename):
-		"""Load a file."""
+				# Always catch SchempyExceptions.
+				except SchempyException as e:
+					print 'Error: %s' % e
+					
+				# Display anything else.
+				# TODO: Enable this in final version
+				#except Exception as e:
+				#	print 'Error: %s' % e
+				
+	
+		# Return the result.
+		return results
+	
+	@Stackless
+	def __eval__(self, exp, env = None):
+		"""Evaluate a Schempy expression."""
+		
+		# If we've stopped, stop.
+		if not self.Running:
+			return None
+		
+		# If no environment was passed, create one.
+		# Wrap the global environment in a new level.
+		if not env:
+			env = self.Environment
+		
+		# Lookup symbols in the environment.
+		if isinstance(exp, SchempySymbol):
+			return env[exp]
+		
+		# TODO: Apply macros (this will be fun!)
+		
+		# Run applications.
+		elif isinstance(exp, list):
+			# Error handling for empty lists.
+			if (exp == []):
+				raise SchempyException('Invalid syntax ()')
+			
+			# Get the function and annotate it with the current evaluator and environment.
+			# NOTE: Changes to the environment will be preserved at the current level.
+			#       To create a new environment, wrap the current environment.
+			rator = self.__eval__(exp[0])
+			rator.Eval = self.__eval__
+			rator.Env = env
+			
+			# Collect the arguments, evaluate them if delay was not requested
+			if '__delay__' in dir(rator) and rator.__delay__:
+				rands = exp[1:]
+			else:
+				rands = [self.__eval__(rand, env) for rand in exp[1:]]
+	
+			# Trace if requested.
+			if 'Trace' in dir(rator) and rator.Trace:
+				print rator.__name__ + self.__toscheme__(rands)
+
+			# Evaluate, finally.
+			return rator(*rands)
+			
+		# Everything else is a literal, return it directly.
+		else:
+			return exp
+		
+	def __load__(self, filename):
+		"""Load a file (either Scheme or Python) into Schempy."""
 
 		# Make sure the file exists.
 		if not os.path.exists(filename):
@@ -88,7 +185,7 @@ class Schempy:
 		# Load Scheme files.
 		if ext in ('.ss', '.scm'):
 			text = open(filename, 'r').read()
-			results = self.Evaluate(text)
+			results = self(text)
 			for line in results:
 					print line
 		
@@ -104,227 +201,55 @@ class Schempy:
 			# Look through the file, load any functions.
 			for fname in dir(newModule):
 				f = newModule.__dict__.get(fname)
-				if isinstance(f, types.FunctionType) and 'SchempyFunction' in dir(f) and f.SchempyFunction:
-					self.GlobalEnv[f.__name__] = f
+				if isinstance(f, types.FunctionType):
+					self.Environment[f.__name__.lower()] = f
 										
 		# Break on any other file types.
 		else:
 			raise SchempyException('Unable to load %s, unknown file type.' % filename)
 			
-	def __InitParser(self):
-		"""Initialize the parser."""
+	def __toscheme__(self, exp):
+		"""Convert an expression to Scheme-like syntax."""
 		
-		# Pyparsing really does most of the work.
-		from pyparsing import alphas, nums, printables, oneOf, stringEnd, Word, Suppress, Forward, Group, ZeroOrMore, OneOrMore, QuotedString
-
-		# What we're eventually trying to build.
-		lparen = (Suppress('(') | Suppress('['))
-		rparen = (Suppress(')') | Suppress(']'))
-		exp = Forward()
-		
-		# Possible characters for us in symbols.
-		validSymbolChars = alphas + nums + '!$%&|*+-/:<=>?@^_~'
-
-		# Literals.
-		string = (QuotedString(quoteChar='"', escChar='\\')).setParseAction(lambda v : v[0])
-		boolean = (Suppress('#') + oneOf('t f')).setParseAction(lambda v : False if v[0] == 'f' else True)
-		integer = (Word(nums)).setParseAction(lambda v : int(v[0]))
-		real = (Word(nums) + Suppress('.') + Word(nums)).setParseAction(lambda v : float(v[0] + '.' + v[1]))
-		null = (Suppress("'") + lparen + rparen).setParseAction(lambda v : None)
-		literal = (string | boolean | integer | real | null)
-
-		# Other identifiers (parse as strings).
-		ident = Word(validSymbolChars).setParseAction(lambda v : [['symbol', v[0]]])
-
-		# Quoted expressions.
-		quote = (Suppress("'") + exp).setParseAction(lambda v : [['quote', v[0]]])
-
-		# Final expression.
-		exp << (literal |
-				quote |
-				ident |
-				Group(lparen + OneOrMore(exp) + rparen))
-		self.SExp = (ZeroOrMore(exp) + stringEnd)
-
-	def __InitEnvironment(self):
-		"""Create the global enviroment."""
-
-		# Create an empty environment.
-		self.GlobalEnv = SchempyEnvironment()
-
-		# Base functions to load files, reset the environment, and quit.
-		# Might want some more error checking here.
-		self.GlobalEnv['trace-eval'] = Export('trace-eval')(lambda : self.__Trace())
-		self.GlobalEnv['load'] = Export('load')(lambda f : self.Load(f))
-		self.GlobalEnv['reset'] = Export('reset')(lambda : self.__InitEnvironment())
-		self.GlobalEnv['exit'] = Export('exit')(lambda : self.__Stop())
-		self.GlobalEnv['quit'] = Export('quit')(lambda : self.__Stop())
-		self.GlobalEnv['trace'] = Export('trace')(lambda f : self.__Trace(f))
-		
-		# Load globals.
-		self.Load('global.py')
-		
-	def __Trace(self, f = None):
-		"""Start tracing."""
-		if f:
-			f.Trace = True
-		else:
-			self.Trace = True
-		
-	def __Stop(self):
-		"""The user requested (quit/exit)."""
-		self.Running = False
-
-	def __Eval(self, exp, env = None, level = 0):
-		"""Evaluate an expression."""
-		
-		# Setup an initial environment if it hasn't been done so before.
-		if not env:
-			env = SchempyEnvironment(self.GlobalEnv)
-
-		# User requested tracing everything (good for them?)
-		if self.Trace:
-			for i in range(level):
-				print '|',
-			print '%s' % self.__tostr(exp)
-
-		# Start with nothing.
-		result = None
-			
-		# Anything that's not a list is a literal.
-		if not (isinstance(exp, pyparsing.ParseResults) or isinstance(exp, tuple) or isinstance(exp, list)):
-			result = exp
-			
-		# Look up symbols.
-		elif exp[0] == 'symbol':
-			result = env[exp[1]]
-			
-		# Defines alter the global environment.
-		# TODO: Figure out how these are supposed to work in a non-global context.
-		# TODO: Add short syntax for lambdas.
-		elif exp[0] == ['symbol', 'define']:
-			self.GlobalEnv[exp[1][1]] = self.__Eval(exp[2], env, level + 1)
-			result = None
-
-		# Bind lambdas.
-		# TODO: Add the different lambda forms.
-		elif exp[0] == ['symbol', 'lambda']:		
-			def f(*args):
-				# Something went horribly wrong.
-				if len(args) != len(exp[1]):
-					# TODO: Remove from final code.
-					raise SchempyException("Unable to apply function because of mismtached argument count (THIS SHOULDN'T HAPPEN!)")
-
-				# Create a new environment to work with.
-				newEnv = copy.copy(env)
-					
-				# Bind parameters.
-				# exp[1] is the parameter list,
-				#   exp[1][i] is each specific paramter,
-				#   exp[1][i][1] removes the ['symbol'] identifier
-				for i in range(len(args)):
-					newEnv[exp[1][i][1]] = args[i]()
-
-				# Evaluate the body.
-				return self.__Eval(exp[2], newEnv, level + 1)
-			
-			# Set all the extra variables to make this a Schempy function.
-			closure = Export(None, len(exp[1]), thunkify = True)(f)
-			closure.Name = None
-			result = closure
-			
-		# Handle quoted arguments.
-		elif exp[0] == 'quote':
-			def quotify(a):
-				if isinstance(a, list) and a[0] == 'symbol':
-					return ['quote', a[1]]
-				elif isinstance(a, list) or isinstance(a, pyparsing.ParseResults):
-					result = None
-					for b in reversed(a):
-						result = (quotify(b), result)
-					return result
-				else:
-					return a
-
-			result = quotify(exp[1])
-
-		# Otherwise, it's an application.
-		# The first argument must evaluate to a function.
-		else:
-			# Get the function, make sure it actually is a Schempy-created function.
-			f = self.__Eval(exp[0], env, level + 1)
-			if not isinstance(f, types.FunctionType):
-				raise SchempyException('Attempted to apply non-procedure %s' % str(f))
-			elif not 'SchempyFunction' in dir(f) or not f.SchempyFunction:
-				raise SchempyException('Attempted to apply incorrectly created function %s' % str(f))
-
-			# Give it a name if we had to look it up.
-			if exp[0][0] == 'symbol' and not f.Name:
-				f.Name = exp[0][1]
-				
-			# Check the argument counts.
-			argCount = len(exp) - 1
-			if f.CollectArgs and argCount < f.ArgCount:
-				raise SchempyException("Incorrect number of arguments to %s, expected at least %d, got %d." % (f.Name, f.ArgCount, argCount))
-			elif not f.CollectArgs and argCount != f.ArgCount:
-				raise SchempyException("Incorrect number of arguments to %s, expected %d, got %d." % (f.Name, f.ArgCount, argCount))
-				
-			# Get the arguments, thunkify if requested.
-			args = []
-			for arg in exp[1:]:
-				if f.Thunkify:
-					args.append(Thunk(self.__Eval, arg, env, level + 1))
-				else:
-					args.append(self.__Eval(arg, env, level + 1))
-					
-			# Apply the function (finally) and return the result.
-			result = apply(f, args)
-			
-		# Got the result, trace it?
-		if self.Trace:
-			for i in range(level):
-				print '>',
-			print '%s' % self.__tostr(result)
-		
-		# Return it in any case, all sorts of fun errors if you forget.
-		return result
-
-	def __tostr(self, exp):
-		"""Stringify a result in Scheme style."""
-
-		# Bool has to be before int because isinstance(True / False) is True
-
+		# Nothing to represent
 		if exp == None:
-			return "()"
-		elif isinstance(exp, bool):
-			return '#t' if exp else '#f'
-		elif isinstance(exp, int) or isinstance(exp, float):
-			return str(exp)
-		elif isinstance(exp, list) and exp[0] == 'quote':
-			return exp[1]
- 		elif isinstance(exp, str):
-			return '"' + exp + '"'
+			return ''
+			
+		# Procedures
 		elif isinstance(exp, types.FunctionType):
-			if 'Name' in dir(exp) and exp.Name:
-				return '#<procedure %s>' % exp.Name
+			if exp.__name__ != '<procedure>':
+				return '#<procedure %s>' % exp.__name__
 			else:
 				return '#<procedure>'
-		elif isinstance(exp, tuple):
-			result = '(' + self.__tostr(exp[0])
-			b = exp[1]
-			while isinstance(b, tuple):
-				result += ' ' + self.__tostr(b[0])
-				b = b[1]
-			if b == None:
-				result += ')'
+				
+		# Symbols
+		elif isinstance(exp, SchempySymbol):
+			return str(exp)
+		
+		# Literals
+		# NOTE: bool has to be before int because bools are ints in Python :-\
+		elif isinstance(exp, bool):
+			if exp:
+				return '#t'
 			else:
-				result += ' . ' + self.__tostr(b) + ')'
-			return result
-		elif isinstance(exp, list) and exp[0] == 'symbol':
-			return exp[1]
-		elif isinstance(exp, list) or isinstance(exp, pyparsing.ParseResults):
-			return '(' + ' '.join([self.__tostr(x) for x in exp]) + ')'
+				return '#f'
+		elif isinstance(exp, int) or isinstance(exp, long):
+			return '%d' % exp
+		elif isinstance(exp, float):
+			return '%f' % exp
+		elif isinstance(exp, str):
+			return '"%s"' % exp
+		
+		# Lists
+		elif isinstance(exp, SchempyDot):
+			return '.'
+		elif isinstance(exp, list):
+			return '(' + ' '.join([self.__toscheme__(subexp) for subexp in exp]) + ')'
+			
+		# Unknown types
 		else:
-			# Remove from final code.
-			raise SchempyException('Unkown type to __tostr: %s' % str(type(exp)))
+			raise SchempyException('Unabled to convert to Scheme format: %s', exp)
 
+if __name__ == '__main__':
+	ss = Schempy()
+	ss.REPL()

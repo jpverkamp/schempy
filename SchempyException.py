@@ -1,3 +1,4 @@
 class SchempyException(Exception):
-	"""Keep exceptions raised by Schempy seperate."""
+	"""Keep SchempyExceptions seperate."""
+
 	pass

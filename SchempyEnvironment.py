@@ -1,31 +1,41 @@
+import types
+
 from SchempyException import SchempyException
 
 class SchempyEnvironment:
-	"""Represents the environment in Schempy."""
+	"""Represents a current environment in Schempy."""
 
 	def __init__(self, base = None):
-		"""Create an environment, potentially on top of a base environment."""
-		
-		self.Items = []
+		"""Create a new environment with a (possible) base environment."""
+
 		self.Base = base
-	
-	def __getitem__(self, a):
-		"""Get an item from the environment."""
+		self.Vars = {}
+
+	def __getitem__(self, key):
+		"""Get an item from this environment."""
+
+		if key in self.Vars:
+			return self.Vars[key]
+		elif self.Base:
+			return self.Base[key]
+		else:
+			raise SchempyException('Unbound variable: %s' % key)
+
+	def __setitem__(self, key, val):
+		"""Set an item in this environment."""
+
+		self.Vars[key] = val
 		
-		for k, v in self.Items:
-			if k == a:
-				return v
+	def __str__(self):
+		"""Stringify the environment."""
+		
+		result = '[env ' + ', '.join([str(k) + ':' + ('function' if isinstance(v, types.FunctionType) else str(v)) for k, v in self.Vars.items()])
 		if self.Base:
-			return self.Base[a]
+			result += ' ' + str(self.Base)
+		result += ']'
+		return result
 		
-		raise SchempyException("Unbound variable: %s" % a)
+	def __repr__(self):
+		"""Return a representation of the environment."""
 		
-	def __setitem__(self, k, v):
-		"""Add an item to the environment."""
-		
-		self.Items = [(k, v)] + self.Items
-		
-	def __copy__(self):
-		"""Create a copy of the current environment."""
-		
-		return SchempyEnvironment(self)
+		return str(self)
